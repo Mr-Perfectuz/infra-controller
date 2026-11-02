@@ -508,8 +508,18 @@ fn clean_pandoc_prose(line: &str, in_inline_code: &mut bool) -> String {
 /// man page's `# NAME`/`# OPTIONS`/… sections to `## ` so each generated page
 /// can own the `# ` title (the full command invocation).
 fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
+    let man = std::fs::read_to_string(man_file)?;
+    // Pandoc (including 3.13) skips both branches of clap_mangen's groff
+    // conditional, leaving Aq undefined and dropping apostrophes. Both branches
+    // define the same character; use an unconditional definition for conversion.
+    // Match only the generated preamble, preserving the actual man page on disk.
+    let preamble = ".ie \\n(.g .ds Aq \\(aq\n.el .ds Aq '\n";
+    let man = match man.strip_prefix(preamble) {
+        Some(body) => format!(".ds Aq \\(aq\n{body}"),
+        None => man,
+    };
     let mut pandoc = pandoc::new();
-    pandoc.add_input(man_file);
+    pandoc.set_input(pandoc::InputKind::Pipe(man));
     pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());
     pandoc.set_output_format(pandoc::OutputFormat::Other("gfm".to_string()), Vec::new());
     // Keep list spacing consistent across Pandoc versions and with Markdown lint.
@@ -589,6 +599,23 @@ mod tests {
         BIN, clean_pandoc_markdown, command_tree, format_markdown_links, replace_synopsis,
         uses_clap_synopsis,
     };
+
+    #[test]
+    #[ignore = "requires pandoc on PATH"]
+    fn man_conversion_preserves_apostrophes() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = clap::Command::new("apostrophes")
+            .about("Inspect the server's profiles and the tenant's choices.");
+        clap_mangen::generate_to(command, dir.path()).unwrap();
+        let path = dir.path().join("apostrophes.1");
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        let markdown = super::man_to_markdown(&path).unwrap();
+
+        assert!(markdown.contains("server's profiles"), "{markdown}");
+        assert!(markdown.contains("tenant's choices"), "{markdown}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
 
     #[test]
     fn repository_doc_paths_become_links_in_generated_markdown() {
