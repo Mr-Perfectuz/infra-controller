@@ -263,7 +263,7 @@ retention policies.
 ## Optional profiles
 
 The `tilt.profiles` switches in [`values.yaml`](values.yaml) control REST, MCP,
-DSX Exchange, and observability. REST brings Temporal and Keycloak, MCP
+DSX Exchange, observability, and DPF. REST brings Temporal and Keycloak, MCP
 automatically brings REST, and DSX Exchange brings NATS. Observability manages
 Loki, Tempo, Alloy, Prometheus, Grafana, and the NICo metrics monitors as one unit. All
 optional profiles are disabled by default.
@@ -292,6 +292,36 @@ Enable the complete observability stack with:
 ```bash
 tilt args -- --observability=true
 ```
+
+Enable DPF-managed DPU initialization by starting the session with:
+
+```bash
+tilt up -f dev/deployment/tilt/Tiltfile -- --dpf=true
+```
+
+The DPF profile installs the DPF CRDs from
+[`crates/dpf/crds`](../../../crates/dpf/crds), creates the
+`dpf-operator-system` namespace, and builds and deploys the
+[DPF simulator](../../k8s/dpf-sim-controller/README.md) in place of the real
+DPF operator. NICo API starts with `[dpf] enabled = true` in its site
+configuration, a mounted ServiceAccount token, and the chart's DPF RBAC, so
+simulated machines run DPU initialization through the DPF provisioning flow
+instead of the legacy iPXE path. Never enable this profile on a cluster that
+also runs the real DPF operator: both would drive the same `DPU` resources.
+Because NICo API's Vault client switches to Kubernetes ServiceAccount login
+whenever a token is mounted, this profile extends the dev Vault's `postStart`
+hook to configure the `kubernetes` auth method and bind the `nico-api`
+ServiceAccount. Vault's StatefulSet only applies updates on pod deletion, so
+when enabling the profile against a cluster whose Vault is already running,
+delete the `nico-vault-0` pod once so the extended hook runs (dev-mode Vault
+keeps no durable state), then retrigger `nico-api`.
+
+Prefer a fresh `tilt up` over toggling `tilt args -- --dpf=true` in a running
+session: dependency ordering applies only to first-time deploys, so a
+mid-session toggle can redeploy NICo API before the namespace and CRDs exist,
+leaving it failed until manually retriggered. The simulator covers initial DPU
+provisioning only; DPF-driven reprovisioning on BFB or flavor changes stays
+inert because no `DPFOperatorConfig` reports `Ready` in this profile.
 
 Return to the values-file defaults with:
 
