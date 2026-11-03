@@ -40,6 +40,7 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 		HostID:             cutil.GetPtr(int32(9)),
 		Labels:             Labels{"old": "value"},
 		NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:00"},
+		NvosIpAddress:      cutil.GetPtr("192.0.2.10"),
 	}
 	tests := []struct {
 		name  string
@@ -102,6 +103,19 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 			},
 		},
 		{
+			name: "reads the single NVOS interface address",
+			proto: &corev1.ExpectedSwitch{
+				NvosInterfaces: []*corev1.ExpectedNvosInterface{{MacAddress: "aa:bb:cc:dd:ee:01"}},
+				NvosIpAddress:  cutil.GetPtr("2001:db8::20"),
+			},
+			want: ExpectedSwitch{
+				ID:               id,
+				SiteID:           siteID,
+				NvosMacAddresses: []string{"aa:bb:cc:dd:ee:01"},
+				NvosIpAddress:    cutil.GetPtr("2001:db8::20"),
+			},
+		},
+		{
 			name: "invalid ID preserves identity and absent fields reset the receiver",
 			proto: &corev1.ExpectedSwitch{
 				ExpectedSwitchId: &corev1.UUID{Value: "not-a-uuid"},
@@ -154,11 +168,22 @@ func TestExpectedSwitch_ToProto(t *testing.T) {
 
 func TestExpectedSwitch_NvosInterfaces(t *testing.T) {
 	tests := []struct {
-		desc    string
-		macs    []string
-		primary *string
-		want    []NvosInterface
+		desc      string
+		macs      []string
+		primary   *string
+		ipAddress *string
+		want      []NvosInterface
 	}{
+		{
+			desc:      "single port includes its requested address",
+			macs:      []string{"aa:bb:cc:dd:ee:01"},
+			ipAddress: cutil.GetPtr("192.0.2.20"),
+			want: []NvosInterface{{
+				MacAddress: "aa:bb:cc:dd:ee:01",
+				IsPrimary:  true,
+				IPAddress:  cutil.GetPtr("192.0.2.20"),
+			}},
+		},
 		{
 			desc: "nil MAC list yields nil",
 			macs: nil,
@@ -191,7 +216,11 @@ func TestExpectedSwitch_NvosInterfaces(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			es := &ExpectedSwitch{NvosMacAddresses: tc.macs, NvosPrimaryMacAddress: tc.primary}
+			es := &ExpectedSwitch{
+				NvosMacAddresses:      tc.macs,
+				NvosPrimaryMacAddress: tc.primary,
+				NvosIpAddress:         tc.ipAddress,
+			}
 			assert.Equal(t, tc.want, es.NvosInterfaces())
 		})
 	}
