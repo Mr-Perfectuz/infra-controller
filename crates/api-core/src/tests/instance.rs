@@ -7553,19 +7553,42 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
     )
     .await;
     let host = create_bf4_astra_host(&env, 9).await;
-    let instance = host
-        .instance_builer(&env)
-        .single_interface_network_config(host_segment_id)
-        .build()
-        .await;
+    // Allocate publicly so the admission check uses a stored Instance.
+    let instance_id = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(single_interface_network_config(host_segment_id)),
+                )
+                .tonic_request(),
+        )
+        .await?
+        .into_inner()
+        .id
+        .expect("the allocated Astra fixture includes its instance ID");
+    // Persist ManagedHostState::Assigned with InstanceState::Ready to reach service admission without
+    // waiting for unrelated DPU network convergence.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        txn.as_mut(),
+        &host.id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await?;
+    txn.commit().await?;
     let service = create_networked_dpf_service(&env, "expected-machine-astra-service").await?;
     mark_networked_dpf_service_ready(&env, service.service_id.parse()?).await?;
-    let baseline = db::instance::find_by_id(&env.pool, instance.id)
+    let baseline = db::instance::find_by_id(&env.pool, instance_id)
         .await?
         .expect("Astra fixture instance remains stored");
 
     // Submit a public attachment so the handler must derive the classifier signal from persistence.
-    let current = instance.rpc_instance().await.into_inner();
+    let current = env.one_instance(instance_id).await.into_inner();
     let mut requested_config = current.config.expect("Astra fixture has a public config");
     requested_config.dpu_extension_services =
         Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -7581,7 +7604,7 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
     let error = crate::instance::service_vpc::with_service_vpc_implementation_support_for_test(
         env.api
             .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
-                instance_id: Some(instance.id),
+                instance_id: Some(instance_id),
                 if_version_match: None,
                 config: Some(requested_config),
                 metadata: current.metadata,
@@ -7599,7 +7622,7 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
 
     // Fresh reads prove classification rejected before storing the attachment, service interface,
     // or `last_used_prefix`.
-    let persisted = db::instance::find_by_id(&env.pool, instance.id)
+    let persisted = db::instance::find_by_id(&env.pool, instance_id)
         .await?
         .expect("Astra fixture instance remains stored after rejection");
     assert_eq!(
@@ -11020,6 +11043,8 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
     // the retained-membership half of the test.
     let mut config = get_config();
     config.dpf.enabled = true;
+    // Configure one service slot so retained endpoints can appear in DPU network responses.
+    config.dpu_config.service_vpc_slot_count = 1;
     let mut overrides = TestEnvOverrides::with_config(config)
         .with_dpf_sdk(service_vpc_deployment_mock())
         .with_fnn_config(None);
@@ -11514,6 +11539,8 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
     // Enable per-VPC loopbacks and DPF service registration for the service-owned pair.
     let mut config = get_config();
     config.dpf.enabled = true;
+    // Configure one service slot so retained endpoints can appear in DPU network responses.
+    config.dpu_config.service_vpc_slot_count = 1;
     let mut overrides = TestEnvOverrides::with_config(config)
         .with_dpf_sdk(service_vpc_deployment_mock())
         .with_fnn_config(None);
@@ -13288,7 +13315,7 @@ async fn test_implicit_sparse_vf_noop_update_bypasses_overlap_lock(
 
 /// Builds a BF4 service-VPC fixture through ordinary ingestion so persisted CX9 classification
 /// can be tested without DPA rows or Kubernetes DPF provisioning.
-async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
+pub(super) async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
     let host = create_managed_host_with_config(env, service_vpc_test_host_config()).await;
     let mut txn = env.db_txn().await;
 
@@ -14989,16 +15016,23 @@ async fn test_update_existing_networked_attachment_preserves_service_interfaces(
     let pool = PgPoolOptions::new().connect_with(options).await?;
     let mut config = get_config();
     config.dpf.enabled = true;
+    // Configure one service slot for the nested managed-host network response.
+    config.dpu_config.service_vpc_slot_count = 1;
     let env = create_test_env_with_overrides(
         pool,
-        TestEnvOverrides::with_config(config).with_dpf_sdk(service_vpc_deployment_mock()),
+        TestEnvOverrides::with_config(config)
+            .with_dpf_sdk(service_vpc_deployment_mock())
+            .with_fnn_config(None),
     )
     .await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let selected_vpc = db::vpc::find_by_segment(&env.pool, segment_id)
-        .await?
-        .expect("created segment belongs to a VPC")
-        .id;
+    // Use an FNN VPC so the persisted endpoint can be rendered by the public DPU response.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+    let (selected_vpc, segment_id) = create_fnn_host_segment(
+        &env,
+        "existing networked attachment VPC",
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[0],
+    )
+    .await;
     let managed_host = create_service_vpc_test_host(&env).await?;
     let instance = managed_host
         .instance_builer(&env)
@@ -16456,6 +16490,17 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         );
     }
 
+    // Report all three Pod services terminated without service-network cleanup evidence.
+    // Observe termination before seeding synthetic endpoints so the response renders only the real
+    // host network; cleanup still runs after both endpoint records have committed.
+    network_configured_with_health_and_ext_services(
+        &env,
+        &mh.dpu_ids[0],
+        None,
+        Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
+    )
+    .await;
+
     // Seed endpoints only for the active and one terminating attachment.
     let stored = db::instance::find_by_id(&env.pool, tinstance.id)
         .await?
@@ -16484,8 +16529,8 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .find(|attachment| attachment.service_id == endpoint_free_service_id)
         .and_then(|attachment| attachment.id)
         .expect("endpoint-free attachment has an ID");
-    // Attachment identity is the cleanup key; the remaining fields make a
-    // valid endpoint that can be persisted, reloaded, and compared afterward.
+    // The attachment_id is the cleanup key; the remaining fields support persistence,
+    // snapshot loading, and comparison without modeling service-network rendering.
     let retained_service_interface = InstanceServiceInterfaceConfig {
         attachment_id: retained_attachment_id, // This active owner must survive cleanup.
         interface_ordinal: 0,
@@ -16534,14 +16579,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         ]
     );
 
-    // Report all three Pod services terminated without service-network cleanup evidence.
-    network_configured_with_health_and_ext_services(
-        &env,
-        &mh.dpu_ids[0],
-        None,
-        Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
-    )
-    .await;
+    // Run cleanup against the committed endpoint records and the public Pod termination observation.
     env.run_machine_state_controller_iteration().await;
 
     // A fresh snapshot proves cleanup removes only the endpoint-free
