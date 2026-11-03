@@ -46,6 +46,20 @@ type ComponentRuntimeStatus struct {
 	Health          *types.HealthReport
 }
 
+// SwitchNvosPort is an observed NVOS port, including ports without addresses.
+type SwitchNvosPort struct {
+	MAC         *string             `json:"mac"`
+	ServicePort *uint32             `json:"servicePort"`
+	Addresses   []SwitchNvosAddress `json:"addresses"`
+	IsPrimary   bool                `json:"isPrimary"`
+}
+
+// SwitchNvosAddress retains Core's address-family label alongside the IP.
+type SwitchNvosAddress struct {
+	AddressFamily string `json:"addressFamily"`
+	Address       string `json:"address"`
+}
+
 func healthReportFromPb(report *corev1.HealthReport) *types.HealthReport {
 	if report == nil {
 		return nil

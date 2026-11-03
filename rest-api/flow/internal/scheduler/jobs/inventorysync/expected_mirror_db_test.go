@@ -781,7 +781,7 @@ func TestUpdateMirroredComponent_PreservesRuntimeWriteAfterReconciliationRead(t 
 				Model((*model.Component)(nil)).
 				Set(
 					"description = jsonb_set(COALESCE(description, '{}'::jsonb), ARRAY[?::text], to_jsonb(?::text), true)",
-					nvosIPDescriptionKey,
+					"nvos_ip",
 					"10.0.0.2",
 				).
 				Where("id = ?", component.ID).
@@ -795,7 +795,7 @@ func TestUpdateMirroredComponent_PreservesRuntimeWriteAfterReconciliationRead(t 
 			var updated model.Component
 			require.NoError(t, pool.DB.NewSelect().Model(&updated).Where("id = ?", component.ID).Scan(ctx))
 			assert.Equal(t, "after", updated.Name)
-			assert.Equal(t, "10.0.0.2", updated.Description[nvosIPDescriptionKey])
+			assert.Equal(t, "10.0.0.2", updated.Description["nvos_ip"])
 			assert.Equal(t, "keep", updated.Description["operator"])
 			if tc.wantExpected {
 				assert.Equal(t, tc.expectedDescription, updated.Description[expectedDescriptionKey])

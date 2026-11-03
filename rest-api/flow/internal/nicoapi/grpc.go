@@ -1010,11 +1010,9 @@ func (c *grpcClient) FindSwitchRuntimeStatuses(ctx context.Context, switchIds []
 	return result, nil
 }
 
-// FindSwitchNvosIPs returns the resolved NVOS host IP for each given switch,
-// keyed by Core SwitchId. Core resolves nvos_info from the expected switch's
-// NVOS MAC and its assigned interface address, and only populates it once both
-// are known, so switches without a resolved NVOS endpoint are omitted.
-func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) (map[string]string, error) {
+// FindSwitchNvosPorts returns every observed NVOS port from status.nvos_ports.
+// It preserves Core's port and address ordering and omits switches without status.
+func (c *grpcClient) FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
 	}
@@ -1029,19 +1027,40 @@ func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) 
 		req.SwitchIds = append(req.SwitchIds, &corev1.SwitchId{Id: id})
 	}
 
-	result := make(map[string]string, len(switchIds))
-	if err := c.gclient.visitSwitchBatches(ctx, req, func(batch []*corev1.Switch) error {
+	result := make(map[string][]SwitchNvosPort, len(switchIds))
+	err := c.gclient.visitSwitchBatches(ctx, req, func(batch []*corev1.Switch) error {
 		for _, sw := range batch {
 			sid := sw.GetId().GetId()
-			if sid == "" {
+			if sid == "" || sw.GetStatus() == nil {
 				continue
 			}
-			if ip := sw.GetNvosInfo().GetIp(); ip != "" { //nolint:staticcheck // Older Core servers return the NVOS address in this field.
-				result[sid] = ip
+			ports := make([]SwitchNvosPort, 0, len(sw.GetStatus().GetNvosPorts()))
+			for _, port := range sw.GetStatus().GetNvosPorts() {
+				if port == nil {
+					continue
+				}
+				addresses := make([]SwitchNvosAddress, 0, len(port.GetAddresses()))
+				for _, address := range port.GetAddresses() {
+					if address == nil {
+						continue
+					}
+					addresses = append(addresses, SwitchNvosAddress{
+						AddressFamily: address.GetAddressFamily().String(),
+						Address:       address.GetAddress(),
+					})
+				}
+				ports = append(ports, SwitchNvosPort{
+					MAC:         port.Mac,
+					ServicePort: port.ServicePort,
+					Addresses:   addresses,
+					IsPrimary:   port.GetIsPrimary(),
+				})
 			}
+			result[sid] = ports
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("FindSwitchesByIds: %w", err)
 	}
 	return result, nil
@@ -2061,7 +2080,7 @@ func (c *grpcClient) SetSwitchControllerState(switchID, state string) {
 	panic("Not a unit test")
 }
 
-func (c *grpcClient) SetSwitchNvosIP(switchID, ip string) {
+func (c *grpcClient) SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort) {
 	panic("Not a unit test")
 }
 
