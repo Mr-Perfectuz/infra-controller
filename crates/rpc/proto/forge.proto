@@ -5817,6 +5817,12 @@ message ManagedHostServiceInterfaceConfig {
   string mac_address = 15;
   // Stable identity used to correlate this service interface across reconciliation.
   common.UUID internal_uuid = 16;
+  // DPU-local loopback shared by host and service ports in this VPC.
+  // If present, must be one non-empty IPv4 or IPv6 address without CIDR notation.
+  // Omission is valid. A rendered host port in this VPC can supply the loopback.
+  // The VPC has no loopback if no rendered port supplies one.
+  // Present host and service loopback values for the same VNI must match.
+  optional string tenant_vrf_loopback_ip = 17;
 }
 
 // Complete fixed service-slot inventory for one DPU deployment.
