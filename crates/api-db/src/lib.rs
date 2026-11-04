@@ -91,6 +91,7 @@ pub mod power_shelf;
 pub mod predicted_machine_interface;
 pub mod queries;
 pub mod rack;
+pub mod read_only_snapshot;
 pub mod redfish_actions;
 pub mod resource_pool;
 pub mod retained_boot_interface;
